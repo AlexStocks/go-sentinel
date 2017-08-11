@@ -6,7 +6,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"net"
+	"strconv"
+)
 
+import (
 	"github.com/garyburd/redigo/redis"
 )
 
@@ -21,7 +25,6 @@ import (
 //  func newSentinelPool() *redis.Pool {
 //  	sntnl := &sentinel.Sentinel{
 //  		Addrs:      []string{":26379", ":26380", ":26381"},
-//  		MasterName: "mymaster",
 //  		Dial: func(addr string) (redis.Conn, error) {
 //  			timeout := 500 * time.Millisecond
 //  			c, err := redis.DialTimeout("tcp", addr, timeout, timeout, timeout)
@@ -60,9 +63,6 @@ type Sentinel struct {
 	// Addrs is a slice with known Sentinel addresses.
 	Addrs []string
 
-	// MasterName is a name of Redis master Sentinel servers monitor.
-	MasterName string
-
 	// Dial is a user supplied function to connect to Sentinel on given address. This
 	// address will be chosen from Addrs slice.
 	// Note that as per the redis-sentinel client guidelines, a timeout is mandatory
@@ -78,6 +78,12 @@ type Sentinel struct {
 	mu    sync.RWMutex
 	pools map[string]*redis.Pool
 	addr  string
+}
+
+type Instance struct {
+	Name string
+	Master net.TCPAddr
+	Slaves []net.TCPAddr
 }
 
 // NoSentinelsAvailable is returned when all sentinels in the list are exhausted
@@ -238,10 +244,10 @@ func (s *Sentinel) doUntilSuccess(f func(redis.Conn) (interface{}, error)) (inte
 	return nil, NoSentinelsAvailable{lastError: lastErr}
 }
 
-// MasterAddr returns an address of current Redis master instance.
-func (s *Sentinel) MasterAddr() (string, error) {
+// MasterAddr returns an address of @name Redis master instance.
+func (s *Sentinel) MasterAddr(name string) (string, error) {
 	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
-		return queryForMaster(c, s.MasterName)
+		return queryForMaster(c, name)
 	})
 	if err != nil {
 		return "", err
@@ -249,10 +255,10 @@ func (s *Sentinel) MasterAddr() (string, error) {
 	return res.(string), nil
 }
 
-// SlaveAddrs returns a slice with known slaves of current master instance.
-func (s *Sentinel) SlaveAddrs() ([]string, error) {
+// SlaveAddrs returns a slice with known slaves of @name master instance.
+func (s *Sentinel) SlaveAddrs(name string) ([]string, error) {
 	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
-		return queryForSlaves(c, s.MasterName)
+		return queryForSlaves(c, name)
 	})
 	if err != nil {
 		return nil, err
@@ -261,9 +267,9 @@ func (s *Sentinel) SlaveAddrs() ([]string, error) {
 }
 
 // SentinelAddrs returns a slice of known Sentinel addresses Sentinel server aware of.
-func (s *Sentinel) SentinelAddrs() ([]string, error) {
+func (s *Sentinel) SentinelAddrs(name string) ([]string, error) {
 	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
-		return queryForSentinels(c, s.MasterName)
+		return queryForSentinels(c, name)
 	})
 	if err != nil {
 		return nil, err
@@ -271,13 +277,55 @@ func (s *Sentinel) SentinelAddrs() ([]string, error) {
 	return res.([]string), nil
 }
 
+// GetInstances returns redis instances
+func (s *Sentinel)GetInstances() ([]Instance, error) {
+	res, err := s.doUntilSuccess(func(conn redis.Conn) (interface{}, error) {
+		res, err := redis.Values(conn.Do("SENTINEL", "masters"))
+		if err != nil {
+			return nil, err
+		}
+		var  instance Instance
+		instances := make([]Instance, 0)
+		for _, a := range res {
+			sm, err := redis.StringMap(a, err)
+			if err != nil {
+				return instances, err
+			}
+			instance.Name = sm["name"]
+			instance.Master.IP = net.ParseIP(sm["ip"])
+			instance.Master.Port, err = strconv.Atoi(sm["port"])
+			if err != nil  {
+				return instances, err
+			}
+			slaves,err := queryForSlaves(conn, instance.Name)
+			if err != nil {
+				return instances, err
+			}
+			for _, addr := range slaves {
+				slave, err := net.ResolveTCPAddr("tcp", addr)
+				if err != nil {
+					return instances, err
+				}
+				instance.Slaves = append(instance.Slaves, *slave)
+			}
+			instances = append(instances, instance)
+		}
+		return instances, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.([]Instance), nil
+}
+
 // Discover allows to update list of known Sentinel addresses. From docs:
 //
 // A client may update its internal list of Sentinel nodes following this procedure:
 // 1) Obtain a list of other Sentinels for this master using the command SENTINEL sentinels <master-name>.
 // 2) Add every ip:port pair not already existing in our list at the end of the list.
-func (s *Sentinel) Discover() error {
-	addrs, err := s.SentinelAddrs()
+func (s *Sentinel) Discover(name string) error {
+	addrs, err := s.SentinelAddrs(name)
 	if err != nil {
 		return err
 	}
