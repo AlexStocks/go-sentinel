@@ -50,6 +50,41 @@ func TestSentinel_GetInstanceNames(t *testing.T) {
 	t.Logf("sentinel instance names:%#v\n", names)
 }
 
+func TestSentinel_GetConn(t *testing.T) {
+	sp := NewSentinel(
+		[]string{"192.168.10.100:26380"},
+	)
+	defer sp.Close()
+
+	instances, err := sp.GetInstances()
+	if err != nil {
+		t.Errorf("st.GetInstances, error:%#v\n", err)
+		t.FailNow()
+	}
+
+	for i, inst := range instances {
+		err = sp.Discover(inst.Name)
+		if err != nil {
+			t.Log(err)
+			t.FailNow()
+		}
+
+		conn := sp.GetConn(fmt.Sprintf("%s:%d", inst.Master.IP, inst.Master.Port))
+		if conn == nil {
+			fmt.Println("get conn fail, ", i)
+			continue
+		}
+		s, err := redis.String(conn.Do("INFO"))
+		if err != nil {
+			fmt.Println("do command error:", err)
+			fmt.Printf("do command error for master addr{idx:%s, addr:%#v}", i, inst.Master)
+			continue
+		}
+		fmt.Printf("idx:%s, addr:%#v, info:%#v", i, inst.Master, s)
+		time.Sleep(1 * time.Second)
+	}
+}
+
 func TestSentinel_MakeSentinelWatcher(t *testing.T) {
 	st := NewSentinel(
 		[]string{"192.168.10.100:26380"},
@@ -88,37 +123,3 @@ func TestSentinel_MakeSentinelWatcher(t *testing.T) {
 	wg.Wait()
 }
 
-func TestSentinelPool(t *testing.T) {
-	sp := NewSentinel(
-		[]string{"192.168.10.100:26380"},
-	)
-	defer sp.Close()
-
-	instances, err := sp.GetInstances()
-	if err != nil {
-		t.Errorf("st.GetInstances, error:%#v\n", err)
-		t.FailNow()
-	}
-
-	for i, inst := range instances {
-		err = sp.Discover(inst.Name)
-		if err != nil {
-			t.Log(err)
-			t.FailNow()
-		}
-
-		conn := sp.GetConn(fmt.Sprintf("%s:%d", inst.Master.IP, inst.Master.Port))
-		if conn == nil {
-			fmt.Println("get conn fail, ", i)
-			continue
-		}
-		s, err := redis.String(conn.Do("INFO"))
-		if err != nil {
-			fmt.Println("do command error:", err)
-			fmt.Printf("do command error for master addr{idx:%s, addr:%#v}", i, inst.Master)
-			continue
-		}
-		fmt.Printf("idx:%s, addr:%#v, info:%#v", i, inst.Master, s)
-		time.Sleep(1 * time.Second)
-	}
-}
