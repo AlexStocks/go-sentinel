@@ -80,10 +80,26 @@ type Sentinel struct {
 	addr  string
 }
 
+// Slave represents a Redis slave instance which is known by Sentinel.
+type Slave struct {
+	net.TCPAddr
+	flags string
+}
+
+// Addr returns an address of slave.
+func (s *Slave) Addr() string {
+	return s.String()
+}
+
+// Available returns if slave is in working state at moment based on information in slave flags.
+func (s *Slave) Available() bool {
+	return !strings.Contains(s.flags, "disconnected") && !strings.Contains(s.flags, "s_down")
+}
+
 type Instance struct {
 	Name string
 	Master net.TCPAddr
-	Slaves []net.TCPAddr
+	Slaves []*Slave
 }
 
 // NoSentinelsAvailable is returned when all sentinels in the list are exhausted
@@ -96,9 +112,8 @@ type NoSentinelsAvailable struct {
 func (ns NoSentinelsAvailable) Error() string {
 	if ns.lastError != nil {
 		return fmt.Sprintf("redigo: no sentinels available; last error: %s", ns.lastError.Error())
-	} else {
-		return fmt.Sprintf("redigo: no sentinels available")
 	}
+	return fmt.Sprintf("redigo: no sentinels available")
 }
 
 // putToTop puts Sentinel address to the top of address list - this means
@@ -255,15 +270,26 @@ func (s *Sentinel) MasterAddr(name string) (string, error) {
 	return res.(string), nil
 }
 
-// SlaveAddrs returns a slice with known slaves of @name master instance.
+// SlaveAddrs returns a slice with known slave addresses of @name master instance.
 func (s *Sentinel) SlaveAddrs(name string) ([]string, error) {
+	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
+		return queryForSlaveAddrs(c, name)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.([]string), nil
+}
+
+// Slaves returns a slice with known slaves of master instance.
+func (s *Sentinel) Slaves(name string) ([]*Slave, error) {
 	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
 		return queryForSlaves(c, name)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return res.([]string), nil
+	return res.([]*Slave), nil
 }
 
 // SentinelAddrs returns a slice of known Sentinel addresses Sentinel server aware of.
@@ -297,18 +323,11 @@ func (s *Sentinel)GetInstances() ([]Instance, error) {
 			if err != nil  {
 				return instances, err
 			}
-			slaves,err := queryForSlaves(conn, instance.Name)
+			instance.Slaves, err = queryForSlaves(conn, instance.Name)
 			if err != nil {
 				return instances, err
 			}
-			for _, addr := range slaves {
-				slave, err := net.ResolveTCPAddr("tcp", addr)
-				if err != nil {
-					return instances, err
-				}
-				instance.Slaves = append(instance.Slaves, *slave)
-			}
-			instances = append(instances, instance)
+		  instances = append(instances, instance)
 		}
 		return instances, nil
 	})
@@ -384,18 +403,38 @@ func queryForMaster(conn redis.Conn, masterName string) (string, error) {
 	return masterAddr, nil
 }
 
-func queryForSlaves(conn redis.Conn, masterName string) ([]string, error) {
+func queryForSlaveAddrs(conn redis.Conn, masterName string) ([]string, error) {
+	slaves, err := queryForSlaves(conn, masterName)
+	if err != nil {
+		return nil, err
+	}
+	slaveAddrs := make([]string, 0)
+	for _, slave := range slaves {
+		slaveAddrs = append(slaveAddrs, slave.Addr())
+	}
+	return slaveAddrs, nil
+}
+
+func queryForSlaves(conn redis.Conn, masterName string) ([]*Slave, error) {
 	res, err := redis.Values(conn.Do("SENTINEL", "slaves", masterName))
 	if err != nil {
 		return nil, err
 	}
-	slaves := make([]string, 0)
+	slaves := make([]*Slave, 0)
 	for _, a := range res {
 		sm, err := redis.StringMap(a, err)
 		if err != nil {
 			return slaves, err
 		}
-		slaves = append(slaves, fmt.Sprintf("%s:%s", sm["ip"], sm["port"]))
+		slave := &Slave{
+			flags: sm["flags"],
+		}
+		slave.IP = net.ParseIP(sm["ip"])
+		slave.Port,err = strconv.Atoi(sm["port"])
+		if err != nil {
+			return slaves, err
+		}
+		slaves = append(slaves, slave)
 	}
 	return slaves, nil
 }
