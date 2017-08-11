@@ -1,13 +1,14 @@
 package sentinel
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"net"
-	"strconv"
 )
 
 import (
@@ -59,6 +60,12 @@ import (
 //  		},
 //  	}
 //  }
+
+const (
+	switchMasterChannel = "+switch-master"
+	defaultTimeout      = 10 // seconds
+)
+
 type Sentinel struct {
 	// Addrs is a slice with known Sentinel addresses.
 	Addrs []string
@@ -97,9 +104,25 @@ func (s *Slave) Available() bool {
 }
 
 type Instance struct {
-	Name string
+	Name   string
 	Master net.TCPAddr
-	Slaves []*Slave
+	Slaves []Slave
+}
+
+func NewSentinel(addrs []string) *Sentinel {
+	return &Sentinel{
+		Addrs: addrs,
+		Dial: func(addr string) (redis.Conn, error) {
+			timeout := defaultTimeout * time.Second
+			// read timeout set to 0 to wait sentinel notify
+			c, err := redis.DialTimeout("tcp", addr,
+				timeout, 0, timeout)
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		},
+	}
 }
 
 // NoSentinelsAvailable is returned when all sentinels in the list are exhausted
@@ -183,10 +206,11 @@ func (s *Sentinel) defaultPool(addr string) *redis.Pool {
 	}
 }
 
-func (s *Sentinel) get(addr string) redis.Conn {
+func (s *Sentinel) GetConn(addr string) redis.Conn {
 	pool := s.poolForAddr(addr)
 	return pool.Get()
 }
+
 
 func (s *Sentinel) poolForAddr(addr string) *redis.Pool {
 	s.mu.Lock()
@@ -237,7 +261,7 @@ func (s *Sentinel) doUntilSuccess(f func(redis.Conn) (interface{}, error)) (inte
 	var lastErr error
 
 	for _, addr := range addrs {
-		conn := s.get(addr)
+		conn := s.GetConn(addr)
 		reply, err := f(conn)
 		conn.Close()
 		if err != nil {
@@ -303,14 +327,19 @@ func (s *Sentinel) SentinelAddrs(name string) ([]string, error) {
 	return res.([]string), nil
 }
 
+// GetSentinels retruns redis sentinels
+func (s *Sentinel) GetSentinels() []string {
+	return  s.Addrs
+}
+
 // GetInstances returns redis instances
-func (s *Sentinel)GetInstances() ([]Instance, error) {
+func (s *Sentinel) GetInstances() ([]Instance, error) {
 	res, err := s.doUntilSuccess(func(conn redis.Conn) (interface{}, error) {
 		res, err := redis.Values(conn.Do("SENTINEL", "masters"))
 		if err != nil {
 			return nil, err
 		}
-		var  instance Instance
+		var instance Instance
 		instances := make([]Instance, 0)
 		for _, a := range res {
 			sm, err := redis.StringMap(a, err)
@@ -320,14 +349,14 @@ func (s *Sentinel)GetInstances() ([]Instance, error) {
 			instance.Name = sm["name"]
 			instance.Master.IP = net.ParseIP(sm["ip"])
 			instance.Master.Port, err = strconv.Atoi(sm["port"])
-			if err != nil  {
+			if err != nil {
 				return instances, err
 			}
 			instance.Slaves, err = queryForSlaves(conn, instance.Name)
 			if err != nil {
 				return instances, err
 			}
-		  instances = append(instances, instance)
+			instances = append(instances, instance)
 		}
 		return instances, nil
 	})
@@ -366,6 +395,136 @@ func (s *Sentinel) Close() error {
 	return nil
 }
 
+func (s *Sentinel) subscriptMasterSwitch() (redis.PubSubConn, error) {
+	s.mu.RLock()
+	addrs := s.Addrs
+	s.mu.RUnlock()
+	var lastErr error
+
+	for _, addr := range addrs {
+		conn := s.GetConn(addr)
+		sub := redis.PubSubConn{Conn: conn}
+		err := sub.Subscribe(switchMasterChannel)
+		if err != nil {
+			lastErr = err
+			s.mu.Lock()
+			pool, ok := s.pools[addr]
+			if ok {
+				pool.Close()
+				delete(s.pools, addr)
+			}
+			s.putToBottom(addr)
+			s.mu.Unlock()
+			continue
+		}
+		s.putToTop(addr)
+		return sub, nil
+	}
+
+	return redis.PubSubConn{nil}, NoSentinelsAvailable{lastError: lastErr}
+}
+
+type MasterSwitchInfo struct {
+	Name      string
+	OldMaster net.TCPAddr
+	NewMaster net.TCPAddr
+}
+
+type SentinelWatcher struct {
+	pubsub redis.PubSubConn
+	sync.Mutex
+	sync.WaitGroup
+	infoChan chan MasterSwitchInfo
+	closed   bool
+}
+
+func NewMasterSentinel(conn redis.PubSubConn) *SentinelWatcher {
+	return &SentinelWatcher{
+		pubsub:   conn,
+		closed:   false,
+		infoChan: make(chan MasterSwitchInfo, 32),
+	}
+}
+
+func (ms *SentinelWatcher) Close() error {
+	// protect pubsub.Unsubscribe to prevent concurrently called
+	ms.Lock()
+	// prevent repeatedly call
+	if ms.closed {
+		ms.Unlock()
+		return nil
+	}
+	ms.pubsub.Unsubscribe(switchMasterChannel) // watch goroutine will exit.
+	ms.closed = true
+	ms.Unlock()
+	// wait watch rontine exit
+	ms.Wait()
+	return ms.pubsub.Close()
+}
+
+func (ms *SentinelWatcher) Watch() (<-chan MasterSwitchInfo, error) {
+	var (
+		err     error
+		tcpAddr *net.TCPAddr
+		info    MasterSwitchInfo
+	)
+
+	ms.Add(1)
+	go func() {
+		defer ms.Done()
+		for {
+			switch reply := ms.pubsub.Receive().(type) {
+			case redis.Message:
+				p := bytes.Split(reply.Data, []byte(" "))
+				if len(p) != 5 {
+					continue
+				}
+				info.Name = string(p[0])
+
+				addr := fmt.Sprintf("%s:%s", string(p[1]), string(p[2]))
+				tcpAddr, err = net.ResolveTCPAddr("tcp4", addr)
+				if err != nil {
+					continue
+				}
+				info.OldMaster = *tcpAddr
+
+				addr = fmt.Sprintf("%s:%s", string(p[3]), string(p[4]))
+				tcpAddr, err = net.ResolveTCPAddr("tcp4", addr)
+				if err != nil {
+					continue
+				}
+				info.NewMaster = *tcpAddr
+
+				ms.infoChan <- info
+
+			case error:
+				// fmt.Printf("watch goroutine got error!\n")
+				close(ms.infoChan)
+				return
+
+			case redis.Subscription:
+				if reply.Channel == switchMasterChannel &&
+					reply.Kind == "unsubscribe" && reply.Count == 0 {
+					close(ms.infoChan)
+					// fmt.Printf("watch goroutine got unsubscribe!\n")
+					return
+				}
+			}
+		}
+	}()
+
+	return ms.infoChan, nil
+}
+
+func (s *Sentinel) MakeSentinelWatcher() (*SentinelWatcher, error) {
+	sub, err := s.subscriptMasterSwitch()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewMasterSentinel(sub), nil
+}
+
 // TestRole wraps GetRole in a test to verify if the role matches an expected
 // role string. If there was any error in querying the supplied connection,
 // the function returns false. Works with Redis >= 2.8.12.
@@ -395,7 +554,7 @@ func getRole(c redis.Conn) (string, error) {
 }
 
 func queryForMaster(conn redis.Conn, masterName string) (string, error) {
-	res, err := redis.Strings(conn.Do("SENTINEL", "get-master-addr-by-name", masterName))
+	res, err := redis.Strings(conn.Do("SENTINEL", "GetConn-master-addr-by-name", masterName))
 	if err != nil {
 		return "", err
 	}
@@ -415,12 +574,12 @@ func queryForSlaveAddrs(conn redis.Conn, masterName string) ([]string, error) {
 	return slaveAddrs, nil
 }
 
-func queryForSlaves(conn redis.Conn, masterName string) ([]*Slave, error) {
+func queryForSlaves(conn redis.Conn, masterName string) ([]Slave, error) {
 	res, err := redis.Values(conn.Do("SENTINEL", "slaves", masterName))
 	if err != nil {
 		return nil, err
 	}
-	slaves := make([]*Slave, 0)
+	slaves := make([]Slave, 0)
 	for _, a := range res {
 		sm, err := redis.StringMap(a, err)
 		if err != nil {
@@ -430,11 +589,11 @@ func queryForSlaves(conn redis.Conn, masterName string) ([]*Slave, error) {
 			flags: sm["flags"],
 		}
 		slave.IP = net.ParseIP(sm["ip"])
-		slave.Port,err = strconv.Atoi(sm["port"])
+		slave.Port, err = strconv.Atoi(sm["port"])
 		if err != nil {
 			return slaves, err
 		}
-		slaves = append(slaves, slave)
+		slaves = append(slaves, *slave)
 	}
 	return slaves, nil
 }
