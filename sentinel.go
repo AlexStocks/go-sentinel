@@ -2,7 +2,6 @@ package sentinel
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -64,6 +63,11 @@ import (
 const (
 	switchMasterChannel = "+switch-master"
 	defaultTimeout      = 10 // seconds
+)
+
+const (
+	RedisMaster = 0
+	RedisSlave = 1
 )
 
 type Sentinel struct {
@@ -367,6 +371,15 @@ func (s *Sentinel) GetInstances() ([]Instance, error) {
 	return res.([]Instance), nil
 }
 
+func (s *Sentinel) GetInstanceNames() ([]string, error) {
+	res, err := s.doUntilSuccess(func(conn redis.Conn) (interface{}, error) { return  getSentileRoles(conn) })
+	if err != nil {
+		return []string{""}, err
+	}
+
+	return res.([]string), nil
+}
+
 // Discover allows to update list of known Sentinel addresses. From docs:
 //
 // A client may update its internal list of Sentinel nodes following this procedure:
@@ -523,34 +536,6 @@ func (s *Sentinel) MakeSentinelWatcher() (*SentinelWatcher, error) {
 	}
 
 	return NewMasterSentinel(sub), nil
-}
-
-// TestRole wraps GetRole in a test to verify if the role matches an expected
-// role string. If there was any error in querying the supplied connection,
-// the function returns false. Works with Redis >= 2.8.12.
-// It's not goroutine safe, but if you call this method on pooled connections
-// then you are OK.
-func TestRole(c redis.Conn, expectedRole string) bool {
-	role, err := getRole(c)
-	if err != nil || role != expectedRole {
-		return false
-	}
-	return true
-}
-
-// getRole is a convenience function supplied to query an instance (master or
-// slave) for its role. It attempts to use the ROLE command introduced in
-// redis 2.8.12.
-func getRole(c redis.Conn) (string, error) {
-	res, err := c.Do("ROLE")
-	if err != nil {
-		return "", err
-	}
-	rres, ok := res.([]interface{})
-	if ok {
-		return redis.String(rres[0], nil)
-	}
-	return "", errors.New("redigo: can not transform ROLE reply to string")
 }
 
 func queryForMaster(conn redis.Conn, masterName string) (string, error) {

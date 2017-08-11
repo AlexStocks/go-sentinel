@@ -11,7 +11,7 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
-func TestSentinel(t *testing.T) {
+func TestSentinel_GetInstances(t *testing.T) {
 	st := NewSentinel(
 		[]string{"192.168.10.100:26380"},
 	)
@@ -34,11 +34,23 @@ func TestSentinel(t *testing.T) {
 
 	addrs := st.GetSentinels()
 	t.Logf("sentinel instances:%#v\n", addrs)
-
-	st.Close()
 }
 
-func TestSentinelWatcher(t *testing.T) {
+func TestSentinel_GetInstanceNames(t *testing.T) {
+	st := NewSentinel(
+		[]string{"192.168.10.100:26380"},
+	)
+	defer st.Close()
+
+	names, err := st.GetInstanceNames()
+	if err != nil {
+		t.Errorf("st.GetInstanceNames, error:%#v\n", err)
+		t.FailNow()
+	}
+	t.Logf("sentinel instance names:%#v\n", names)
+}
+
+func TestSentinel_MakeSentinelWatcher(t *testing.T) {
 	st := NewSentinel(
 		[]string{"192.168.10.100:26380"},
 	)
