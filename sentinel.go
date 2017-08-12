@@ -2,6 +2,7 @@ package sentinel
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -215,6 +216,15 @@ func (s *Sentinel) GetConn(addr string) redis.Conn {
 	return pool.Get()
 }
 
+func (s *Sentinel) GetConnByRole(addr string, role RedisRole) (redis.Conn, error) {
+	pool := s.poolForAddr(addr)
+	conn := pool.Get()
+	if !CheckRole(conn, role) {
+		return nil, errors.New("Role check failed")
+	}
+
+	return conn, nil
+}
 
 func (s *Sentinel) poolForAddr(addr string) *redis.Pool {
 	s.mu.Lock()
@@ -333,7 +343,12 @@ func (s *Sentinel) SentinelAddrs(name string) ([]string, error) {
 
 // GetSentinels retruns redis sentinels
 func (s *Sentinel) GetSentinels() []string {
-	return  s.Addrs
+	var addrs = make([]string, len(s.Addrs))
+	s.mu.RLock()
+	copy(addrs, s.Addrs)
+	s.mu.RUnlock()
+
+	return addrs
 }
 
 // GetInstances returns redis instances

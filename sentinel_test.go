@@ -69,7 +69,7 @@ func TestSentinel_GetConn(t *testing.T) {
 			t.FailNow()
 		}
 
-		conn := sp.GetConn(fmt.Sprintf("%s:%d", inst.Master.IP, inst.Master.Port))
+		conn, _ := sp.GetConnByRole(fmt.Sprintf("%s:%d", inst.Master.IP, inst.Master.Port), RR_Master)
 		if conn == nil {
 			fmt.Println("get conn fail, ", i)
 			continue

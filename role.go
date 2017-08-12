@@ -63,7 +63,6 @@ func getRole(c redis.Conn) (string, error) {
 	return "", errors.New("redigo: can not transform ROLE reply to string")
 }
 
-
 // getRoles is a convenience function supplied to query an instance
 // for its role. It attempts to use the ROLE command introduced in
 // redis 2.8.12.
