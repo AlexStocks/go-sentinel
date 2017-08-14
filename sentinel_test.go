@@ -1,9 +1,10 @@
 package sentinel
 
 import (
-	"testing"
+	"encoding/json"
 	"fmt"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -24,7 +25,8 @@ func TestSentinel_GetInstances(t *testing.T) {
 	}
 
 	for idx, inst := range instances {
-		t.Logf("idx:%d, instance:%#v\n", idx, inst)
+		inst_str, _ := json.Marshal(inst)
+		t.Logf("idx:%d, instance:%s\n", idx, inst_str)
 		err = st.Discover(inst.Name)
 		if err != nil {
 			t.Log(err)
@@ -74,6 +76,7 @@ func TestSentinel_GetConn(t *testing.T) {
 			fmt.Println("get conn fail, ", i)
 			continue
 		}
+		defer conn.Close()
 		s, err := redis.String(conn.Do("INFO"))
 		if err != nil {
 			fmt.Println("do command error:", err)

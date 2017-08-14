@@ -64,11 +64,8 @@ import (
 const (
 	switchMasterChannel = "+switch-master"
 	defaultTimeout      = 10 // seconds
-)
-
-const (
-	RedisMaster = 0
-	RedisSlave = 1
+	defaultMaxConnNum   = 32
+	defaultMaxIdleNum   = 16
 )
 
 type Sentinel struct {
@@ -109,9 +106,9 @@ func (s *Slave) Available() bool {
 }
 
 type Instance struct {
-	Name   string
-	Master net.TCPAddr
-	Slaves []Slave
+	Name   string      `json:"name, omitempty"`
+	Master net.TCPAddr `json:"master, omitempty"`
+	Slaves []Slave     `json:"slaves, omitempty"`
 }
 
 func NewSentinel(addrs []string) *Sentinel {
@@ -197,8 +194,8 @@ func (s *Sentinel) putToBottom(addr string) {
 // us to call concurrent requests to Sentinel using connection Do method.
 func (s *Sentinel) defaultPool(addr string) *redis.Pool {
 	return &redis.Pool{
-		MaxIdle:     3,
-		MaxActive:   10,
+		MaxIdle:     defaultMaxIdleNum,
+		MaxActive:   defaultMaxConnNum,
 		Wait:        true,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
