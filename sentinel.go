@@ -112,6 +112,20 @@ type Instance struct {
 	Slaves []Slave     `json:"slaves, omitempty"`
 }
 
+func (i Instance) String() string {
+	var s = fmt.Sprintf("{Name:%s, Master:%s, Slaves:{", i.Name, i.Master.String())
+
+	for idx, slave := range i.Slaves {
+		s += slave.String()
+		if idx != len(i.Slaves)-1 {
+			s += ", "
+		}
+	}
+	s += "}}"
+
+	return s
+}
+
 func NewSentinel(addrs []string) *Sentinel {
 	return &Sentinel{
 		Addrs: addrs,
@@ -318,14 +332,14 @@ func (s *Sentinel) SlaveAddrs(name string) ([]string, error) {
 }
 
 // Slaves returns a slice with known slaves of master instance.
-func (s *Sentinel) Slaves(name string) ([]*Slave, error) {
+func (s *Sentinel) Slaves(name string) ([]Slave, error) {
 	res, err := s.doUntilSuccess(func(c redis.Conn) (interface{}, error) {
 		return queryForSlaves(c, name)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return res.([]*Slave), nil
+	return res.([]Slave), nil
 }
 
 // SentinelAddrs returns a slice of known Sentinel addresses Sentinel server aware of.
