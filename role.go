@@ -1,4 +1,11 @@
-package sentinel
+// Copyright 2016 ~ 2017 AlexStocks(https://github.com/AlexStocks).
+// All rights reserved.  Use of this source code is
+// governed by Apache License 2.0.
+
+// 2017-08-12 11:57
+// Package redis provides a redis driver by sentinel
+// ref: https://github.com/alexstocks/go-sentinel/blob/master/role.go
+package redis
 
 import (
 	"errors"
@@ -8,33 +15,6 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
-// RedisRole defines the role of the redis
-type RedisRole int
-
-const (
-	RR_BEGIN RedisRole = iota
-	RR_Master
-	RR_Slave
-	RR_Sentinel
-	RR_END
-)
-
-var redisRoleStrings = [...]string{
-	"Begin",
-	"master",
-	"slave",
-	"sentinel",
-	"End",
-}
-
-func (r RedisRole) String() string {
-	if RR_BEGIN < r && r < RR_END {
-		return redisRoleStrings[r]
-	}
-
-	return ""
-}
-
 // CheckRole wraps GetRole in a test to verify if the role matches an expected
 // role string. If there was any error in querying the supplied connection,
 // the function returns false. Works with Redis >= 2.8.12.
@@ -42,7 +22,7 @@ func (r RedisRole) String() string {
 // then you are OK.
 func CheckRole(c redis.Conn, redisRole RedisRole) bool {
 	role, err := getRole(c)
-	if err != nil || role != redisRole.String() {
+	if err != nil || getRedisRole(role) != redisRole {
 		return false
 	}
 	return true
@@ -75,17 +55,17 @@ func getSentileRoles(c redis.Conn) ([]string, error) {
 	if !ok {
 		return []string{""}, errors.New("redigo: can not transform ROLE reply to string")
 	}
-	if len(res1)!=2 {
+	if len(res1) != 2 {
 		return []string{""}, errors.New("redigo: the length of ROLE reply is not 2")
 	}
-	if string(res1[0].([]byte)) != (RedisRole(RR_Sentinel)).String() {
+	if getRedisRole(string(res1[0].([]byte))) != (RedisRole(RR_Sentinel)) {
 		return []string{""}, errors.New("redigo: res[0] of ROLE replay is not \"sentinel\"")
 	}
 	res2, ok := res1[1].([]interface{})
 	if !ok {
 		return []string{""}, errors.New("redigo: can not transform res[1] of ROLE replay to []interface{}")
 	}
-	if len(res2)==0 {
+	if len(res2) == 0 {
 		return []string{""}, errors.New("redigo: the length of res[1] of ROLE reply is 0")
 	}
 
@@ -96,4 +76,3 @@ func getSentileRoles(c redis.Conn) ([]string, error) {
 
 	return addrs, nil
 }
-
