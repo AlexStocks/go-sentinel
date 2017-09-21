@@ -11,4 +11,9 @@ Library is available under the [Apache License, Version 2.0](http://www.apache.o
 
 Introduction
 -------
-Add RedisRole, GetInstances, RemoveInstnace, GetInstanceNames, MasterSwitchSentinelWatcher, SdownSentinelWatcher
+- RedisRole
+- GetInstances
+- RemoveInstnace
+- GetInstanceNames
+- MasterSwitchSentinelWatcher
+- SdownSentinelWatcher
